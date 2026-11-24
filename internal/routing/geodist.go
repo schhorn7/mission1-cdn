@@ -98,7 +98,7 @@ func SelectBestNode(clientRegion string, availableNodes []models.StorageNode, re
 
 	var candidateNodes []models.StorageNode
 	for _, node := range availableNodes {
-		if replicaSet[node.NodeID] && node.Status == "Active" {
+		if replicaSet[node.NodeID] && strings.EqualFold(node.Status, "active") {
 			candidateNodes = append(candidateNodes, node)
 		}
 	}
