@@ -9,12 +9,9 @@ import (
 )
 
 var RegionDistanceMap = map[string][]string {
-	"asia": {"asia", "singapore", "tokyo", "europe", "london", "americas", "newyork"},
-	"singapore": {"singapore", "asia", "tokyo", "europe", "london", "americas", "newyork"},
-	"americas": {"americas", "newyork", "us", "europe", "london", "asia", "singapoor"},
-	"newyork": {"newyork", "americas", "us", "europe", "london", "asia", "singapore"},
-	"europe": {"europe", "london", "frankfurt", "asia", "singapore", "americas", "newyork"},
-	"london": {"london", "europe", "frankfurt", "americas", "newyork", "asia", "singapore"},
+	"asia":     {"asia", "europe", "americas"},
+	"europe":   {"europe", "asia", "americas"},
+	"americas": {"americas", "europe", "asia"},
 }
 
 func DetectClientRegion(r *http.Request, defaultRegion string) (string, string) {
@@ -25,7 +22,7 @@ func DetectClientRegion(r *http.Request, defaultRegion string) (string, string) 
 			return region, "Browser Timezone (" + tz + ")"
 		}
 	}
-
+    
 	if reg := r.Header.Get("X-User-Region"); reg != "" {
 		return strings.TrimSpace(reg), "Header (X-User-Region)"
 	}
