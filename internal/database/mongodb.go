@@ -154,3 +154,8 @@ func (m *MongoDB) ListRecentFiles(ctx context.Context, limit int64) ([]models.Fi
 	}
 	return files, nil
 } 
+
+func (m *MongoDB) DeleteFileMetadata(ctx context.Context, fileID string) error {
+	_, err := m.Files.DeleteOne(ctx, bson.M{"_id": fileID})
+	return err
+}

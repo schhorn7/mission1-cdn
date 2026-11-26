@@ -79,6 +79,7 @@ func main() {
 	mux.HandleFunc("/api/v1/upload", srv.handleUpload)
 	mux.HandleFunc("/api/v1/nodes", srv.handleNodes)
 	mux.HandleFunc("/api/v1/files", srv.handleFiles)
+	mux.HandleFunc("/api/v1/files/", srv.handleFileItem)
 	mux.HandleFunc("/files/", srv.handleGetFile)
 
 	server := &http.Server{
@@ -105,11 +106,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"status":  "operational",
 		"version": "1.0",
 		"endpoints": []string{
-			"POST /api/v1/upload",
-			"GET  /api/v1/nodes",
-			"POST /api/v1/nodes",
-			"GET  /api/v1/files",
-			"GET  /files/{id}",
+			"POST   /api/v1/upload",
+			"GET    /api/v1/nodes",
+			"POST   /api/v1/nodes",
+			"GET    /api/v1/files",
+			"DELETE /api/v1/files/{id}",
+			"GET    /files/{id}",
+			"DELETE /files/{id}",
 		},
 		"frontend_web_app": "http://localhost:3000 (Server #1)",
 	})
@@ -229,15 +232,20 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	fileID := strings.TrimPrefix(r.URL.Path, "/files/")
 	fileID = strings.TrimSpace(fileID)
 	if fileID == "" {
 		http.Error(w, "File ID missing", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		s.handleDeleteFile(w, r, fileID)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -375,6 +383,112 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(files)
 }
+
+func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
+	fileID := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		http.Error(w, "File ID missing", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
+		s.handleDeleteFile(w, r, fileID)
+	case http.MethodGet:
+		r.URL.Path = "/files/" + fileID
+		s.handleGetFile(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, fileID string) {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		http.Error(w, "File ID missing", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	meta, err := s.db.GetFileMetadata(ctx, fileID)
+	if err != nil || meta == nil {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	ext := filepath.Ext(meta.Filename)
+	if ext == "" {
+		ext = ".bin"
+	}
+	storageFilename := fmt.Sprintf("%s%s", fileID, ext)
+
+	// Fetch all nodes to map replica IDs to node connection details
+	allNodes, err := s.db.GetAllNodes(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch nodes: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	replicaSet := make(map[string]bool)
+	for _, rep := range meta.Replicas {
+		replicaSet[rep] = true
+	}
+
+	var targetNodes []models.StorageNode
+	for _, node := range allNodes {
+		// Target nodes holding replicas or active nodes if replicas list was unassigned
+		if replicaSet[node.NodeID] || (len(meta.Replicas) == 0 && node.Status == "active") {
+			targetNodes = append(targetNodes, node)
+		}
+	}
+
+	// Concurrent fan-out deletion across all replica storage nodes
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var deletedFrom []string
+	var deletionErrors []string
+
+	for _, node := range targetNodes {
+		wg.Add(1)
+		go func(targetNode models.StorageNode) {
+			defer wg.Done()
+			err := s.sftpPool.DeleteFile(targetNode, storageFilename)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				log.Printf("[SFTP Delete Warning] File %s on Node %s: %v", storageFilename, targetNode.NodeID, err)
+				deletionErrors = append(deletionErrors, fmt.Sprintf("%s: %v", targetNode.NodeID, err))
+			} else {
+				log.Printf("[SFTP Deleted] File %s from Node %s (%s)", storageFilename, targetNode.NodeID, targetNode.Region)
+				deletedFrom = append(deletedFrom, targetNode.NodeID)
+			}
+		}(node)
+	}
+
+	wg.Wait()
+
+	// Delete file metadata from MongoDB
+	if err := s.db.DeleteFileMetadata(ctx, fileID); err != nil {
+		log.Printf("[MongoDB Delete Error] File %s: %v", fileID, err)
+		http.Error(w, fmt.Sprintf("Failed to remove file metadata: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[Central API] File %s metadata deleted from MongoDB", fileID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":            "File deleted successfully across cluster",
+		"file_id":            fileID,
+		"filename":           meta.Filename,
+		"deleted_from_nodes": deletedFrom,
+		"errors":             deletionErrors,
+	})
+}
+
 
 func (s *Server) seedDefaultNodes() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -202,3 +202,22 @@ func (p *ClientPool) ReadFile(node models.StorageNode, filename string) (*Remote
 		size:       size,
 	}, nil
 }
+
+// DeleteFile connects to the target storage node via SFTP and deletes the specified file.
+func (p *ClientPool) DeleteFile(node models.StorageNode, filename string) error {
+	sshClient, sftpClient, err := p.Dial(node)
+	if err != nil {
+		return err
+	}
+	defer sshClient.Close()
+	defer sftpClient.Close()
+	storageDir := node.StoragePath
+	if storageDir == "" {
+		storageDir = "/data/storage"
+	}
+	remoteFilePath := path.Join(storageDir, filename)
+	if err := sftpClient.Remove(remoteFilePath); err != nil {
+		return fmt.Errorf("failed to remove %s on node %s: %w", remoteFilePath, node.NodeID, err)
+	}
+	return nil
+}
